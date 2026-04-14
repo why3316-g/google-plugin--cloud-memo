@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>云备忘录</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 头部 -->
+    <header class="header">
+      <h1>📝 云备忘录</h1>
+      <div class="header-actions">
+        <button id="syncBtn" class="icon-btn" title="同步">
+          <span id="syncIcon">🔄</span>
+        </button>
+        <button id="newNoteBtn" class="icon-btn" title="新建">
+          <span>+</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 登录状态 -->
+    <div id="authSection" class="auth-section">
+      <span class="auth-text">登录后可同步到云端</span>
+      <button id="loginBtn" class="btn btn-primary">Google 登录</button>
+    </div>
+
+    <div id="userSection" class="user-section hidden">
+      <span id="userEmail"></span>
+      <button id="logoutBtn" class="btn btn-small">退出</button>
+    </div>
+
+    <!-- 同步状态提示 -->
+    <div id="syncStatus" class="sync-status hidden">
+      <span id="syncStatusText">已同步</span>
+    </div>
+
+    <!-- 主内容区 -->
+    <div class="main-content">
+      <!-- 左侧笔记列表 -->
+      <div id="noteList" class="note-list">
+        <div class="note-list-header">
+          <span>我的笔记</span>
+          <span id="noteCount" class="note-count">0</span>
+        </div>
+        <div id="notesContainer" class="notes-container">
+          <!-- 笔记列表将在这里动态生成 -->
+        </div>
+      </div>
+
+      <!-- 右侧编辑区 -->
+      <div class="editor-area">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon">📝</div>
+          <p>选择一个笔记或创建新笔记</p>
+        </div>
+
+        <div id="editor" class="editor hidden">
+          <input type="text" id="noteTitle" placeholder="标题" class="note-title-input">
+          <textarea id="noteContent" placeholder="在此输入内容..." class="note-content-input"></textarea>
+          <div class="editor-footer">
+            <span id="lastModified" class="last-modified"></span>
+            <div class="editor-actions">
+              <button id="deleteNoteBtn" class="btn btn-danger">删除</button>
+              <button id="saveNoteBtn" class="btn btn-primary">保存</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 提示消息 -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
