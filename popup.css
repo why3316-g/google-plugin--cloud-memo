@@ -421,3 +421,93 @@ body {
 .note-item.dragging {
   opacity: 0.5;
 }
+
+/* 同步选择对话框 */
+.sync-dialog {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.sync-dialog.hidden {
+  display: none;
+}
+
+.sync-dialog-content {
+  background: white;
+  padding: 24px;
+  border-radius: 12px;
+  width: 320px;
+  text-align: center;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.sync-dialog-content h3 {
+  margin: 0 0 12px 0;
+  font-size: 18px;
+  color: #333;
+}
+
+.sync-dialog-content p {
+  margin: 0 0 20px 0;
+  font-size: 14px;
+  color: #666;
+  line-height: 1.5;
+}
+
+.sync-dialog-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-dialog-buttons .btn {
+  width: 100%;
+  padding: 10px;
+  font-size: 14px;
+}
+
+.btn-secondary {
+  background: #f0f0f0;
+  color: #333;
+  border: 1px solid #ddd;
+}
+
+.btn-secondary:hover {
+  background: #e0e0e0;
+}
+
+/* 合并对话框内容样式 */
+.merge-content {
+  text-align: left;
+  margin: 16px 0;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.merge-content p {
+  margin: 8px 0;
+  font-size: 14px;
+  color: #333;
+}
+
+.merge-content span {
+  font-weight: bold;
+  color: #1a73e8;
+}
+
+.conflict-info {
+  color: #f57c00 !important;
+  font-size: 13px !important;
+  margin-top: 12px !important;
+  padding-top: 8px;
+  border-top: 1px dashed #ddd;
+}

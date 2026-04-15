@@ -12,8 +12,11 @@
     <header class="header">
       <h1>📝 云备忘录</h1>
       <div class="header-actions">
-        <button id="syncBtn" class="icon-btn" title="同步">
-          <span id="syncIcon">🔄</span>
+        <button id="syncToCloudBtn" class="icon-btn" title="同步到云端">
+          <span>⬆️</span>
+        </button>
+        <button id="syncFromCloudBtn" class="icon-btn" title="同步到本地">
+          <span>⬇️</span>
         </button>
         <button id="newNoteBtn" class="icon-btn" title="新建">
           <span>+</span>
@@ -73,6 +76,38 @@
 
     <!-- 提示消息 -->
     <div id="toast" class="toast hidden"></div>
+    
+    <!-- 同步选择对话框 -->
+    <div id="syncDialog" class="sync-dialog hidden">
+      <div class="sync-dialog-content">
+        <h3>同步数据</h3>
+        <p id="syncDialogText">云端有 X 条笔记，本地有 Y 条笔记。</p>
+        <div class="sync-dialog-buttons">
+          <button id="syncToLocalBtn" class="btn btn-primary">同步到本地</button>
+          <button id="syncToCloudBtn" class="btn btn-secondary">同步到线上</button>
+          <button id="syncCancelBtn" class="btn btn-small">取消</button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 合并预览对话框 -->
+    <div id="mergeDialog" class="sync-dialog hidden">
+      <div class="sync-dialog-content">
+        <h3>数据合并预览</h3>
+        <div id="mergeDialogContent" class="merge-content">
+          <p>本地: <span id="localCount">0</span> 条</p>
+          <p>云端: <span id="cloudCount">0</span> 条</p>
+          <p>合并后: <span id="mergedCount">0</span> 条</p>
+          <p id="conflictInfo" class="conflict-info"></p>
+        </div>
+        <div class="sync-dialog-buttons">
+          <button id="mergeBtn" class="btn btn-primary">智能合并</button>
+          <button id="useCloudBtn" class="btn btn-secondary">用云端覆盖</button>
+          <button id="useLocalBtn" class="btn btn-secondary">保留本地</button>
+          <button id="mergeCancelBtn" class="btn btn-small">取消</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="popup.js"></script>

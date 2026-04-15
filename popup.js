@@ -7,6 +7,8 @@ let isAuthenticated = false;
 let userEmail = '';
 let autoSaveTimer = null;
 let draggedItem = null;
+let syncDialogResolve = null;
+let pendingSyncToCloud = false; // 标记是否有待同步到云端的操作
 
 // DOM 元素
 const elements = {
@@ -15,8 +17,8 @@ const elements = {
   userEmail: document.getElementById('userEmail'),
   loginBtn: document.getElementById('loginBtn'),
   logoutBtn: document.getElementById('logoutBtn'),
-  syncBtn: document.getElementById('syncBtn'),
-  syncIcon: document.getElementById('syncIcon'),
+  syncToCloudBtn: document.getElementById('syncToCloudBtn'),
+  syncFromCloudBtn: document.getElementById('syncFromCloudBtn'),
   syncStatus: document.getElementById('syncStatus'),
   syncStatusText: document.getElementById('syncStatusText'),
   newNoteBtn: document.getElementById('newNoteBtn'),
@@ -29,7 +31,21 @@ const elements = {
   lastModified: document.getElementById('lastModified'),
   saveNoteBtn: document.getElementById('saveNoteBtn'),
   deleteNoteBtn: document.getElementById('deleteNoteBtn'),
-  toast: document.getElementById('toast')
+  toast: document.getElementById('toast'),
+  syncDialog: document.getElementById('syncDialog'),
+  syncDialogText: document.getElementById('syncDialogText'),
+  syncToLocalBtn: document.getElementById('syncToLocalBtn'),
+  syncToCloudDialogBtn: document.getElementById('syncToCloudBtn'),
+  syncCancelBtn: document.getElementById('syncCancelBtn'),
+  mergeDialog: document.getElementById('mergeDialog'),
+  localCountSpan: document.getElementById('localCount'),
+  cloudCountSpan: document.getElementById('cloudCount'),
+  mergedCountSpan: document.getElementById('mergedCount'),
+  conflictInfo: document.getElementById('conflictInfo'),
+  mergeBtn: document.getElementById('mergeBtn'),
+  useCloudBtn: document.getElementById('useCloudBtn'),
+  useLocalBtn: document.getElementById('useLocalBtn'),
+  mergeCancelBtn: document.getElementById('mergeCancelBtn')
 };
 
 // 初始化
@@ -46,7 +62,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   
   setupEventListeners();
-  checkAuthStatus();
+  await checkAuthStatus();
 });
 
 // 加载笔记
@@ -487,15 +503,36 @@ async function logout() {
   }
 }
 
+// 检查网络连接
+async function checkNetwork() {
+  try {
+    const response = await fetch('https://www.googleapis.com/generate_204', { 
+      method: 'HEAD',
+      mode: 'no-cors',
+      cache: 'no-store'
+    });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
 // 同步到云端
-async function syncToCloud() {
+async function syncToCloud(isAutoSync = false) {
   if (!isAuthenticated) {
-    showToast('请先登录');
+    if (!isAutoSync) showToast('请先登录');
     return;
   }
   
-  updateSyncStatus('正在上传...', 'syncing');
-  elements.syncIcon.classList.add('syncing');
+  // 检查网络连接
+  const isOnline = await checkNetwork();
+  if (!isOnline) {
+    if (!isAutoSync) {
+      showToast('网络连接失败，请稍后重试');
+    }
+    pendingSyncToCloud = true; // 标记稍后重试
+    return;
+  }
   
   try {
     const token = await getAuthToken(false);
@@ -525,9 +562,8 @@ async function syncToCloud() {
       mimeType: 'application/json'
     };
     
-    if (searchResult.files && searchResult.files.length > 0) {
-      metadata.id = searchResult.files[0].id;
-    } else {
+    // 只有在创建新文件时才添加 parents
+    if (!searchResult.files || searchResult.files.length === 0) {
       metadata.parents = ['appDataFolder'];
     }
     
@@ -556,30 +592,33 @@ async function syncToCloud() {
     
     if (response.ok) {
       await chrome.storage.local.set({ lastSync: Date.now() });
-      updateSyncStatus('同步成功');
-      showToast('已同步到云端');
+      if (!isAutoSync) {
+        showToast('已同步到云端');
+      }
     } else {
       const error = await response.text();
       throw new Error(error);
     }
   } catch (error) {
     console.error('同步失败:', error);
-    updateSyncStatus('同步失败', 'error');
-    showToast('同步失败: ' + error.message);
-  } finally {
-    elements.syncIcon.classList.remove('syncing');
+    pendingSyncToCloud = true; // 标记稍后重试
+    if (!isAutoSync) {
+      showToast('同步失败: ' + error.message);
+    }
   }
 }
 
-// 从云端同步
-async function syncFromCloud() {
-  if (!isAuthenticated) {
-    showToast('请先登录');
+// 自动从云端同步（打开扩展时调用）- 静默同步
+async function autoSyncFromCloud() {
+  if (!isAuthenticated) return;
+  
+  // 检查网络连接
+  const isOnline = await checkNetwork();
+  if (!isOnline) {
+    // 静默失败，不显示任何提示
+    console.log('网络不可用，跳过自动同步');
     return;
   }
-  
-  updateSyncStatus('正在下载...', 'syncing');
-  elements.syncIcon.classList.add('syncing');
   
   try {
     const token = await getAuthToken(false);
@@ -602,8 +641,150 @@ async function syncFromCloud() {
         const data = await fileResponse.json();
         
         if (data.notes && Array.isArray(data.notes)) {
-          // 合并本地和云端数据
-          if (confirm(`云端有 ${data.notes.length} 条笔记，本地有 ${notes.length} 条笔记。\n\n点击"确定"用云端数据覆盖本地\n点击"取消"保留本地数据并上传`)) {
+          // 自动同步：直接用云端数据覆盖本地
+          notes = data.notes;
+          
+          // 恢复顺序
+          if (data.noteOrder && Array.isArray(data.noteOrder)) {
+            const orderMap = new Map(data.noteOrder.map((id, index) => [id, index]));
+            notes.sort((a, b) => {
+              const orderA = orderMap.get(a.id) ?? Infinity;
+              const orderB = orderMap.get(b.id) ?? Infinity;
+              return orderA - orderB;
+            });
+          }
+          
+          await saveNotes();
+          saveNoteOrder();
+          renderNoteList();
+          
+          // 默认选中第一个
+          if (notes.length > 0) {
+            selectNote(notes[0].id);
+          }
+          
+          console.log('已从云端静默同步');
+        }
+      } else {
+        throw new Error('下载失败');
+      }
+    } else {
+      // 云端没有数据，静默上传本地数据
+      console.log('云端暂无数据，将静默上传本地数据');
+      await syncToCloud(true);
+    }
+  } catch (error) {
+    console.error('自动同步失败:', error);
+    // 静默失败，不显示错误提示
+  }
+}
+
+// 智能合并笔记（按ID和更新时间）
+function mergeNotes(localNotes, cloudNotes) {
+  const mergedMap = new Map();
+  const conflicts = [];
+  
+  // 先添加所有本地笔记
+  localNotes.forEach(note => {
+    mergedMap.set(note.id, { ...note, source: 'local' });
+  });
+  
+  // 合并云端笔记
+  cloudNotes.forEach(cloudNote => {
+    const localNote = mergedMap.get(cloudNote.id);
+    
+    if (localNote) {
+      // 相同ID的笔记，比较更新时间
+      if (cloudNote.updatedAt > localNote.updatedAt) {
+        // 云端更新，替换
+        mergedMap.set(cloudNote.id, { ...cloudNote, source: 'cloud' });
+      } else if (cloudNote.updatedAt < localNote.updatedAt) {
+        // 本地更新，保留本地
+        // 但标记为有冲突（时间不同）
+        conflicts.push({
+          id: cloudNote.id,
+          local: localNote,
+          cloud: cloudNote
+        });
+      }
+      // 如果时间相同，保留本地
+    } else {
+      // 云端有本地没有，添加
+      mergedMap.set(cloudNote.id, { ...cloudNote, source: 'cloud' });
+    }
+  });
+  
+  // 转换为数组
+  const merged = Array.from(mergedMap.values());
+  
+  // 按更新时间倒序排列（最新的在前）
+  merged.sort((a, b) => b.updatedAt - a.updatedAt);
+  
+  return { merged, conflicts };
+}
+
+// 从云端同步（手动点击同步按钮）- 智能合并
+async function syncFromCloud() {
+  if (!isAuthenticated) {
+    showToast('请先登录');
+    return;
+  }
+  
+  // 检查网络连接
+  const isOnline = await checkNetwork();
+  if (!isOnline) {
+    showToast('同步失败，因为网络连接不上，请稍后重试');
+    return;
+  }
+  
+  try {
+    const token = await getAuthToken(false);
+    
+    // 搜索云端文件
+    const searchResponse = await fetch(
+      'https://www.googleapis.com/drive/v3/files?q=name=%27memo_backup.json%27+and+%27appDataFolder%27+in+parents&spaces=appDataFolder',
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const searchResult = await searchResponse.json();
+    
+    if (searchResult.files && searchResult.files.length > 0) {
+      // 下载文件
+      const fileResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${searchResult.files[0].id}?alt=media`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+      
+      if (fileResponse.ok) {
+        const data = await fileResponse.json();
+        
+        if (data.notes && Array.isArray(data.notes)) {
+          // 智能合并
+          const { merged, conflicts } = mergeNotes(notes, data.notes);
+          
+          // 显示合并预览
+          const mergeChoice = await showMergeDialog(
+            notes.length, 
+            data.notes.length, 
+            merged.length,
+            conflicts.length
+          );
+          
+          if (mergeChoice === 'merge') {
+            // 使用智能合并结果
+            notes = merged.map(({ source, ...note }) => note); // 移除 source 标记
+            
+            await saveNotes();
+            saveNoteOrder();
+            renderNoteList();
+            
+            // 默认选中第一个
+            if (notes.length > 0) {
+              selectNote(notes[0].id);
+            }
+            
+            showToast(`已合并完成，共 ${merged.length} 条笔记`);
+          } else if (mergeChoice === 'cloud') {
+            // 用云端数据完全覆盖本地
             notes = data.notes;
             
             // 恢复顺序
@@ -620,32 +801,71 @@ async function syncFromCloud() {
             saveNoteOrder();
             renderNoteList();
             
-            // 默认选中第一个
             if (notes.length > 0) {
               selectNote(notes[0].id);
             }
             
-            updateSyncStatus('已同步云端数据');
-            showToast('已同步云端数据');
-          } else {
-            // 用户选择上传本地数据
-            await syncToCloud();
+            showToast('已用云端数据覆盖本地');
+          } else if (mergeChoice === 'local') {
+            // 用户选择保留本地，不上传
+            showToast('已保留本地数据');
           }
         }
       } else {
         throw new Error('下载失败');
       }
     } else {
-      updateSyncStatus('云端暂无数据，将上传本地数据');
-      showToast('云端暂无数据，将上传本地数据');
-      await syncToCloud();
+      showToast('云端暂无数据');
     }
   } catch (error) {
     console.error('同步失败:', error);
-    updateSyncStatus('同步失败', 'error');
-    showToast('同步失败: ' + error.message);
-  } finally {
-    elements.syncIcon.classList.remove('syncing');
+    showToast('同步失败，因为网络连接不上，请稍后重试');
+  }
+}
+
+// 显示同步选择对话框
+function showSyncDialog(cloudCount, localCount) {
+  return new Promise((resolve) => {
+    syncDialogResolve = resolve;
+    elements.syncDialogText.textContent = `云端有 ${cloudCount} 条笔记，本地有 ${localCount} 条笔记。`;
+    elements.syncDialog.classList.remove('hidden');
+  });
+}
+
+// 关闭同步对话框
+function closeSyncDialog(result) {
+  elements.syncDialog.classList.add('hidden');
+  if (syncDialogResolve) {
+    syncDialogResolve(result);
+    syncDialogResolve = null;
+  }
+}
+
+// 显示合并预览对话框
+let mergeDialogResolve = null;
+function showMergeDialog(localCount, cloudCount, mergedCount, conflictCount) {
+  return new Promise((resolve) => {
+    mergeDialogResolve = resolve;
+    elements.localCountSpan.textContent = localCount;
+    elements.cloudCountSpan.textContent = cloudCount;
+    elements.mergedCountSpan.textContent = mergedCount;
+    
+    if (conflictCount > 0) {
+      elements.conflictInfo.textContent = `发现 ${conflictCount} 条笔记在两端都有更新，将保留最新版本`;
+    } else {
+      elements.conflictInfo.textContent = '没有发现冲突';
+    }
+    
+    elements.mergeDialog.classList.remove('hidden');
+  });
+}
+
+// 关闭合并对话框
+function closeMergeDialog(result) {
+  elements.mergeDialog.classList.add('hidden');
+  if (mergeDialogResolve) {
+    mergeDialogResolve(result);
+    mergeDialogResolve = null;
   }
 }
 
@@ -666,43 +886,34 @@ function setupEventListeners() {
   elements.loginBtn.addEventListener('click', login);
   elements.logoutBtn.addEventListener('click', logout);
   
-  // 同步按钮 - 短按下载，长按上传
-  let pressTimer;
-  let isLongPress = false;
+  // 同步对话框按钮
+  elements.syncToLocalBtn.addEventListener('click', () => closeSyncDialog('local'));
+  elements.syncToCloudDialogBtn.addEventListener('click', () => closeSyncDialog('cloud'));
+  elements.syncCancelBtn.addEventListener('click', () => closeSyncDialog('cancel'));
   
-  const startPress = () => {
-    isLongPress = false;
-    pressTimer = setTimeout(() => {
-      isLongPress = true;
-      syncToCloud();
-    }, 800);
-  };
-  
-  const endPress = () => {
-    if (pressTimer) {
-      clearTimeout(pressTimer);
-      pressTimer = null;
-      if (!isLongPress) {
-        syncFromCloud();
-      }
+  // 同步到云端按钮
+  elements.syncToCloudBtn.addEventListener('click', () => {
+    if (!isAuthenticated) {
+      showToast('请先登录');
+      return;
     }
-  };
-  
-  elements.syncBtn.addEventListener('mousedown', startPress);
-  elements.syncBtn.addEventListener('mouseup', endPress);
-  elements.syncBtn.addEventListener('mouseleave', () => {
-    if (pressTimer) {
-      clearTimeout(pressTimer);
-      pressTimer = null;
-    }
+    syncToCloud();
   });
   
-  // 触摸事件支持
-  elements.syncBtn.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    startPress();
+  // 同步到本地按钮
+  elements.syncFromCloudBtn.addEventListener('click', () => {
+    if (!isAuthenticated) {
+      showToast('请先登录');
+      return;
+    }
+    syncFromCloud();
   });
-  elements.syncBtn.addEventListener('touchend', endPress);
+  
+  // 合并对话框按钮
+  elements.mergeBtn.addEventListener('click', () => closeMergeDialog('merge'));
+  elements.useCloudBtn.addEventListener('click', () => closeMergeDialog('cloud'));
+  elements.useLocalBtn.addEventListener('click', () => closeMergeDialog('local'));
+  elements.mergeCancelBtn.addEventListener('click', () => closeMergeDialog('cancel'));
 }
 
 // 显示提示
