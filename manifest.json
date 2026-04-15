@@ -29,7 +29,7 @@
     "128": "icons/icon128.png"
   },
   "oauth2": {
-    "client_id": "5571685604242-2oa0uljb50mqai9ni4fmjn6qmrifm0rg.apps.googleusercontent.com",
+    "client_id": "571685604242-2oa0uljb50mqai9ni4fmjn6qmrifm0rg.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/drive.appdata",
       "https://www.googleapis.com/auth/userinfo.email"

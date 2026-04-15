@@ -85,12 +85,15 @@ async function loadNotes() {
 async function saveNotes() {
   try {
     // 保存笔记数据
-    await chrome.storage.local.set({ 
+    await chrome.storage.local.set({
       notes: notes,
       lastModified: Date.now()
     });
+    console.log('保存成功，笔记数量:', notes.length);
   } catch (error) {
     console.error('保存笔记失败:', error);
+    showToast('保存失败: ' + error.message);
+    throw error; // 重新抛出错误以便上层处理
   }
 }
 
@@ -254,18 +257,31 @@ function createNewNote() {
 
 // 保存当前笔记
 async function saveCurrentNote() {
-  if (!currentNoteId) return;
-  
+  if (!currentNoteId) {
+    console.warn('没有选中的笔记');
+    return;
+  }
+
   const note = notes.find(n => n.id === currentNoteId);
-  if (note) {
+  if (!note) {
+    console.error('找不到笔记，ID:', currentNoteId);
+    showToast('保存失败: 找不到笔记');
+    return;
+  }
+
+  try {
     note.title = elements.noteTitle.value.trim();
     note.content = elements.noteContent.value;
     note.updatedAt = Date.now();
-    
+
     await saveNotes();
     renderNoteList();
     elements.lastModified.textContent = '最后修改: ' + formatDateTime(note.updatedAt);
     showToast('已保存');
+    console.log('笔记保存成功');
+  } catch (error) {
+    console.error('保存当前笔记失败:', error);
+    showToast('保存失败，请查看控制台');
   }
 }
 
@@ -401,56 +417,38 @@ function updateSyncStatus(message, type = 'normal') {
 async function login() {
   try {
     updateSyncStatus('正在登录...', 'syncing');
-    
-    // 先清除可能存在的旧token（更彻底的清除）
-    try {
-      const oldToken = await getAuthToken(false);
-      if (oldToken) {
-        // 从 Chrome 缓存中移除
-        await new Promise((resolve) => {
-          chrome.identity.removeCachedAuthToken({ token: oldToken }, () => {
-            // 同时尝试从 Google 端撤销 token
-            fetch(`https://accounts.google.com/o/oauth2/revoke?token=${oldToken}`)
-              .then(() => resolve())
-              .catch(() => resolve());
-          });
-        });
-      }
-    } catch (e) {
-      // 忽略错误
-    }
-    
-    // 清除所有身份验证缓存
-    await new Promise((resolve) => {
-      chrome.identity.clearAllCachedAuthTokens(() => {
-        resolve();
-      });
-    });
-    
-    // 延迟一下确保清除完成
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
+    console.log('开始登录流程...');
+
+    // 直接获取 token，不清理缓存
     const token = await getAuthToken(true);
-    
+    console.log('获取到 token:', token ? '成功' : '失败');
+
     if (token) {
       const userInfo = await getUserInfo(token);
+      console.log('获取用户信息:', userInfo);
+
       if (userInfo && userInfo.email) {
         isAuthenticated = true;
         userEmail = userInfo.email;
         updateAuthUI();
         showToast('登录成功！');
-        
+
         // 登录后询问是否同步
         setTimeout(async () => {
           if (confirm('登录成功！是否从云端同步数据？')) {
             await syncFromCloud();
           }
         }, 500);
+        return;
       }
     }
+
+    // 如果到这里说明没有获取到用户信息
+    throw new Error('无法获取用户信息');
   } catch (error) {
     console.error('登录失败:', error);
-    
+    updateSyncStatus('登录失败', 'error');
+
     // 详细的错误提示
     let errorMsg = '登录失败';
     if (error.message && error.message.includes('bad client id')) {
@@ -460,9 +458,8 @@ async function login() {
     } else if (error.message) {
       errorMsg = '登录失败: ' + error.message;
     }
-    
+
     showToast(errorMsg);
-    updateSyncStatus('登录失败', 'error');
   }
 }
 
