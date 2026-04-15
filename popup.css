@@ -54,12 +54,12 @@ body {
 }
 
 .btn-primary {
-  background: rgba(255, 255, 255, 0.2);
+  background: #667eea;
   color: white;
 }
 
 .btn-primary:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: #5a6fd6;
 }
 
 .btn-secondary {
