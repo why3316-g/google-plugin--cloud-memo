@@ -3,6 +3,7 @@
   "name": "云备忘录",
   "version": "1.0.0",
   "description": "简洁的云端备忘录，支持多设备同步",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0YDUgHS3dGL21sA4Eew1F5OTKGBDWSj+e+0UfYZ35dUm/zv2t0QfRLJLVq82caYdQLbMM24iiZpkxuB+NKPGWHbvSUVBgPOc6Of2UpEKjrWXoEtCYGfDwhgdNYyMV9phldvoFEu9LaYXfjh8tG69GRvmYJj5DZcr85TqmeNhSfoEDpTZQbTAVap+53E0Vqovl+4sfcvqUDRSSl8HoUQVu+X4lcGa8LxU5Q+Qr4h0SKcQyafuYLcLoF1y2QI6LuZoGQPHJZcdR3p+SUygWVMobJ5D9KFIhpd9Jmbl4gunWvcjRC3jtBKAAFByODyh4ZBhaAF+VvcqClhBYKuOxP2+hwIDAQAB",
   "permissions": [
     "storage",
     "identity",
