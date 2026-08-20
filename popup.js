@@ -7,8 +7,15 @@ let isAuthenticated = false;
 let userEmail = '';
 let autoSaveTimer = null;
 let draggedItem = null;
-let syncDialogResolve = null;
-let pendingSyncToCloud = false; // 标记是否有待同步到云端的操作
+let pendingSyncToCloud = false;
+let deletedNotes = {};
+let syncBaseNotes = [];
+let syncInProgress = false;
+let autoSyncTimer = null;
+let authRetryTimer = null;
+let authRetryAttempt = 0;
+const authRetryDelays = [5000, 15000, 30000, 60000];
+const editHistory = new Map();
 
 // DOM 元素
 const elements = {
@@ -32,19 +39,12 @@ const elements = {
   saveNoteBtn: document.getElementById('saveNoteBtn'),
   deleteNoteBtn: document.getElementById('deleteNoteBtn'),
   toast: document.getElementById('toast'),
-  syncDialog: document.getElementById('syncDialog'),
-  syncDialogText: document.getElementById('syncDialogText'),
-  syncToLocalBtn: document.getElementById('syncToLocalBtn'),
-  syncToCloudDialogBtn: document.getElementById('syncToCloudBtn'),
-  syncCancelBtn: document.getElementById('syncCancelBtn'),
   mergeDialog: document.getElementById('mergeDialog'),
   localCountSpan: document.getElementById('localCount'),
   cloudCountSpan: document.getElementById('cloudCount'),
   mergedCountSpan: document.getElementById('mergedCount'),
   conflictInfo: document.getElementById('conflictInfo'),
   mergeBtn: document.getElementById('mergeBtn'),
-  useCloudBtn: document.getElementById('useCloudBtn'),
-  useLocalBtn: document.getElementById('useLocalBtn'),
   mergeCancelBtn: document.getElementById('mergeCancelBtn')
 };
 
@@ -63,14 +63,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   setupEventListeners();
   await checkAuthStatus();
+  if (isAuthenticated) {
+    startAutoSync();
+    await autoSyncFromCloud();
+  }
 });
 
 // 加载笔记
 async function loadNotes() {
   try {
-    const result = await chrome.storage.local.get(['notes', 'lastSync', 'noteOrder']);
+    const result = await chrome.storage.local.get([
+      'notes',
+      'lastSync',
+      'noteOrder',
+      'deletedNotes',
+      'syncBaseNotes'
+    ]);
     if (result.notes && Array.isArray(result.notes)) {
-      notes = result.notes;
+      notes = MemoSync.normalizeNotes(result.notes);
+      deletedNotes = MemoSync.normalizeDeletedNotes(result.deletedNotes);
+      syncBaseNotes = MemoSync.normalizeNotes(result.syncBaseNotes);
       
       // 如果有保存的顺序，按顺序排序
       if (result.noteOrder && Array.isArray(result.noteOrder)) {
@@ -87,6 +99,7 @@ async function loadNotes() {
         id: Date.now(),
         title: '欢迎使用云备忘录',
         content: '这是一个简洁的云端备忘录工具。\n\n功能特点：\n- 创建和编辑笔记\n- 自动保存到本地\n- 登录 Google 账号后可同步到云端\n- 多设备数据同步\n- 拖拽调整笔记顺序\n\n点击左上角的 + 按钮创建新笔记！\n\n拖拽笔记可以调整顺序哦~',
+        createdAt: Date.now(),
         updatedAt: Date.now()
       }];
       await saveNotes();
@@ -98,13 +111,15 @@ async function loadNotes() {
 }
 
 // 保存笔记到本地
-async function saveNotes() {
+async function saveNotes({ markModified = true } = {}) {
   try {
     // 保存笔记数据
-    await chrome.storage.local.set({
-      notes: notes,
-      lastModified: Date.now()
-    });
+    const data = {
+      notes: MemoSync.normalizeNotes(notes),
+      deletedNotes
+    };
+    if (markModified) data.lastModified = Date.now();
+    await chrome.storage.local.set(data);
     console.log('保存成功，笔记数量:', notes.length);
   } catch (error) {
     console.error('保存笔记失败:', error);
@@ -248,6 +263,11 @@ function selectNote(noteId) {
     elements.noteTitle.value = note.title;
     elements.noteContent.value = note.content;
     elements.lastModified.textContent = '最后修改: ' + formatDateTime(note.updatedAt);
+    editHistory.set(String(noteId), {
+      undo: editHistory.get(String(noteId))?.undo || [],
+      redo: [],
+      lastSnapshot: { title: note.title, content: note.content }
+    });
     renderNoteList(); // 更新选中状态
   }
 }
@@ -258,6 +278,7 @@ function createNewNote() {
     id: Date.now(),
     title: '',
     content: '',
+    createdAt: Date.now(),
     updatedAt: Date.now()
   };
   
@@ -272,7 +293,7 @@ function createNewNote() {
 }
 
 // 保存当前笔记
-async function saveCurrentNote() {
+async function saveCurrentNote({ markModified = true } = {}) {
   if (!currentNoteId) {
     console.warn('没有选中的笔记');
     return;
@@ -290,7 +311,7 @@ async function saveCurrentNote() {
     note.content = elements.noteContent.value;
     note.updatedAt = Date.now();
 
-    await saveNotes();
+    await saveNotes({ markModified });
     renderNoteList();
     elements.lastModified.textContent = '最后修改: ' + formatDateTime(note.updatedAt);
     showToast('已保存');
@@ -308,6 +329,8 @@ async function deleteCurrentNote() {
   if (confirm('确定要删除这个笔记吗？')) {
     const currentIndex = notes.findIndex(n => n.id === currentNoteId);
     notes = notes.filter(n => n.id !== currentNoteId);
+    deletedNotes[String(currentNoteId)] = Date.now();
+    editHistory.delete(String(currentNoteId));
     await saveNotes();
     saveNoteOrder();
     
@@ -328,6 +351,7 @@ async function deleteCurrentNote() {
 
 // 自动保存
 function setupAutoSave() {
+  captureEditSnapshot();
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer);
   }
@@ -352,6 +376,63 @@ function setupAutoSave() {
   }, 1000);
 }
 
+function getCurrentEditSnapshot() {
+  return {
+    title: elements.noteTitle.value,
+    content: elements.noteContent.value
+  };
+}
+
+function captureEditSnapshot() {
+  if (!currentNoteId) return;
+  const key = String(currentNoteId);
+  const current = getCurrentEditSnapshot();
+  const history = editHistory.get(key) || { undo: [], redo: [], lastSnapshot: current };
+  if (history.lastSnapshot.title !== current.title || history.lastSnapshot.content !== current.content) {
+    history.undo.push(history.lastSnapshot);
+    if (history.undo.length > 100) history.undo.shift();
+    history.redo = [];
+    history.lastSnapshot = current;
+  }
+  editHistory.set(key, history);
+}
+
+async function applyEditSnapshot(snapshot) {
+  if (!currentNoteId || !snapshot) return;
+  const note = notes.find(n => n.id === currentNoteId);
+  if (!note) return;
+  note.title = snapshot.title;
+  note.content = snapshot.content;
+  note.updatedAt = Date.now();
+  elements.noteTitle.value = snapshot.title;
+  elements.noteContent.value = snapshot.content;
+  elements.lastModified.textContent = '最后修改: ' + formatDateTime(note.updatedAt);
+  await saveNotes();
+  renderNoteList();
+}
+
+async function undoEdit() {
+  if (!currentNoteId) return;
+  const history = editHistory.get(String(currentNoteId));
+  if (!history || history.undo.length === 0) return showToast('没有可撤销的修改');
+  const current = getCurrentEditSnapshot();
+  history.redo.push(current);
+  history.lastSnapshot = history.undo.pop();
+  await applyEditSnapshot(history.lastSnapshot);
+  showToast('已撤销');
+}
+
+async function redoEdit() {
+  if (!currentNoteId) return;
+  const history = editHistory.get(String(currentNoteId));
+  if (!history || history.redo.length === 0) return showToast('没有可恢复的修改');
+  const current = getCurrentEditSnapshot();
+  history.undo.push(current);
+  history.lastSnapshot = history.redo.pop();
+  await applyEditSnapshot(history.lastSnapshot);
+  showToast('已恢复');
+}
+
 // 检查登录状态
 async function checkAuthStatus() {
   try {
@@ -364,16 +445,24 @@ async function checkAuthStatus() {
       if (userInfo && userInfo.email) {
         isAuthenticated = true;
         userEmail = userInfo.email;
+        clearAuthRetry();
         updateAuthUI();
         updateSyncStatus('已登录，可同步');
+        return true;
       }
-    } else {
-      updateAuthUI();
     }
-  } catch (error) {
-    console.log('未登录:', error);
     isAuthenticated = false;
+    userEmail = '';
     updateAuthUI();
+    scheduleAuthRetry();
+    return false;
+  } catch (error) {
+    console.log('静默登录检查失败:', error);
+    isAuthenticated = false;
+    userEmail = '';
+    updateAuthUI();
+    scheduleAuthRetry();
+    return false;
   }
 }
 
@@ -429,9 +518,41 @@ function updateSyncStatus(message, type = 'normal') {
   }
 }
 
+function scheduleAuthRetry() {
+  if (isAuthenticated || authRetryTimer) return;
+  const delay = authRetryDelays[Math.min(authRetryAttempt, authRetryDelays.length - 1)];
+  authRetryAttempt += 1;
+  updateSyncStatus(`未检测到登录，${Math.round(delay / 1000)} 秒后自动检查`);
+  authRetryTimer = setTimeout(async () => {
+    authRetryTimer = null;
+    const authenticated = await checkAuthStatus();
+    if (authenticated) {
+      startAutoSync();
+      await autoSyncFromCloud();
+    }
+  }, delay);
+}
+
+function clearAuthRetry() {
+  if (authRetryTimer) clearTimeout(authRetryTimer);
+  authRetryTimer = null;
+  authRetryAttempt = 0;
+}
+
+function startAutoSync() {
+  if (autoSyncTimer) return;
+  autoSyncTimer = setInterval(() => autoSyncFromCloud(), 60 * 1000);
+}
+
+function stopAutoSync() {
+  if (autoSyncTimer) clearInterval(autoSyncTimer);
+  autoSyncTimer = null;
+}
+
 // 登录
 async function login() {
   try {
+    clearAuthRetry();
     updateSyncStatus('正在登录...', 'syncing');
     console.log('开始登录流程...');
 
@@ -446,15 +567,11 @@ async function login() {
       if (userInfo && userInfo.email) {
         isAuthenticated = true;
         userEmail = userInfo.email;
+        clearAuthRetry();
         updateAuthUI();
+        startAutoSync();
         showToast('登录成功！');
-
-        // 登录后询问是否同步
-        setTimeout(async () => {
-          if (confirm('登录成功！是否从云端同步数据？')) {
-            await syncFromCloud();
-          }
-        }, 500);
+        await autoSyncFromCloud();
         return;
       }
     }
@@ -476,6 +593,7 @@ async function login() {
     }
 
     showToast(errorMsg);
+    scheduleAuthRetry();
   }
 }
 
@@ -495,6 +613,8 @@ async function logout() {
     
     isAuthenticated = false;
     userEmail = '';
+    clearAuthRetry();
+    stopAutoSync();
     updateAuthUI();
     updateSyncStatus('已退出登录');
     showToast('已退出登录');
@@ -517,343 +637,150 @@ async function checkNetwork() {
   }
 }
 
-// 同步到云端
-async function syncToCloud(isAutoSync = false) {
-  if (!isAuthenticated) {
-    if (!isAutoSync) showToast('请先登录');
-    return;
-  }
-  
-  // 检查网络连接
-  const isOnline = await checkNetwork();
-  if (!isOnline) {
-    if (!isAutoSync) {
-      showToast('网络连接失败，请稍后重试');
-    }
-    pendingSyncToCloud = true; // 标记稍后重试
-    return;
-  }
-  
-  try {
-    const token = await getAuthToken(false);
-    
-    // 准备数据
-    const data = {
-      notes: notes,
-      noteOrder: notes.map(n => n.id),
-      syncTime: Date.now(),
-      device: 'Chrome Extension'
-    };
-    
-    // 搜索是否已有文件
-    const searchResponse = await fetch(
-      'https://www.googleapis.com/drive/v3/files?q=name=%27memo_backup.json%27+and+%27appDataFolder%27+in+parents&spaces=appDataFolder',
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const searchResult = await searchResponse.json();
-    
-    // 准备 multipart 请求体
-    const boundary = '-------314159265358979323846';
-    const delimiter = "\r\n--" + boundary + "\r\n";
-    const close_delim = "\r\n--" + boundary + "--";
-    
-    const metadata = {
-      name: 'memo_backup.json',
-      mimeType: 'application/json'
-    };
-    
-    // 只有在创建新文件时才添加 parents
-    if (!searchResult.files || searchResult.files.length === 0) {
-      metadata.parents = ['appDataFolder'];
-    }
-    
-    const multipartRequestBody =
-      delimiter +
-      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-      JSON.stringify(metadata) +
-      delimiter +
-      'Content-Type: application/json\r\n\r\n' +
-      JSON.stringify(data) +
-      close_delim;
-    
-    const method = (searchResult.files && searchResult.files.length > 0) ? 'PATCH' : 'POST';
-    const url = (searchResult.files && searchResult.files.length > 0)
-      ? `https://www.googleapis.com/upload/drive/v3/files/${searchResult.files[0].id}?uploadType=multipart`
-      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
-    
-    const response = await fetch(url, {
-      method: method,
+// 获取云端文件。每次同步都先读取云端，再合并，避免上传按钮直接覆盖云端。
+async function fetchCloudState(token) {
+  const query = encodeURIComponent("name='memo_backup.json' and 'appDataFolder' in parents and trashed=false");
+  const searchResponse = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&spaces=appDataFolder&fields=files(id,name)`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!searchResponse.ok) throw new Error(`读取云端文件失败（${searchResponse.status}）`);
+  const searchResult = await searchResponse.json();
+  const file = searchResult.files && searchResult.files[0];
+  if (!file) return null;
+
+  const fileResponse = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!fileResponse.ok) throw new Error(`下载云端数据失败（${fileResponse.status}）`);
+  return { fileId: file.id, data: await fileResponse.json() };
+}
+
+async function uploadCloudState(token, envelope, fileId = null) {
+  const boundary = '-------314159265358979323846';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+  const metadata = { name: 'memo_backup.json', mimeType: 'application/json' };
+  if (!fileId) metadata.parents = ['appDataFolder'];
+  const body = delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) + delimiter +
+    'Content-Type: application/json\r\n\r\n' +
+    JSON.stringify(envelope) + closeDelimiter;
+  const response = await fetch(
+    fileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+    {
+      method: fileId ? 'PATCH' : 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'multipart/related; boundary="' + boundary + '"'
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary="${boundary}"`
       },
-      body: multipartRequestBody
-    });
-    
-    if (response.ok) {
-      await chrome.storage.local.set({ lastSync: Date.now() });
-      if (!isAutoSync) {
-        showToast('已同步到云端');
-      }
-    } else {
-      const error = await response.text();
-      throw new Error(error);
+      body
     }
-  } catch (error) {
-    console.error('同步失败:', error);
-    pendingSyncToCloud = true; // 标记稍后重试
-    if (!isAutoSync) {
-      showToast('同步失败: ' + error.message);
-    }
+  );
+  if (!response.ok) throw new Error(`上传合并结果失败（${response.status}）`);
+}
+
+async function flushPendingEdit() {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    await saveCurrentNote({ markModified: false });
   }
 }
 
-// 自动从云端同步（打开扩展时调用）- 静默同步
-async function autoSyncFromCloud() {
-  if (!isAuthenticated) return;
-  
-  // 检查网络连接
-  const isOnline = await checkNetwork();
-  if (!isOnline) {
-    // 静默失败，不显示任何提示
-    console.log('网络不可用，跳过自动同步');
-    return;
-  }
-  
-  try {
-    const token = await getAuthToken(false);
-    
-    // 搜索云端文件
-    const searchResponse = await fetch(
-      'https://www.googleapis.com/drive/v3/files?q=name=%27memo_backup.json%27+and+%27appDataFolder%27+in+parents&spaces=appDataFolder',
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const searchResult = await searchResponse.json();
-    
-    if (searchResult.files && searchResult.files.length > 0) {
-      // 下载文件
-      const fileResponse = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${searchResult.files[0].id}?alt=media`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      
-      if (fileResponse.ok) {
-        const data = await fileResponse.json();
-        
-        if (data.notes && Array.isArray(data.notes)) {
-          // 自动同步：直接用云端数据覆盖本地
-          notes = data.notes;
-          
-          // 恢复顺序
-          if (data.noteOrder && Array.isArray(data.noteOrder)) {
-            const orderMap = new Map(data.noteOrder.map((id, index) => [id, index]));
-            notes.sort((a, b) => {
-              const orderA = orderMap.get(a.id) ?? Infinity;
-              const orderB = orderMap.get(b.id) ?? Infinity;
-              return orderA - orderB;
-            });
-          }
-          
-          await saveNotes();
-          saveNoteOrder();
-          renderNoteList();
-          
-          // 默认选中第一个
-          if (notes.length > 0) {
-            selectNote(notes[0].id);
-          }
-          
-          console.log('已从云端静默同步');
-        }
-      } else {
-        throw new Error('下载失败');
-      }
-    } else {
-      // 云端没有数据，静默上传本地数据
-      console.log('云端暂无数据，将静默上传本地数据');
-      await syncToCloud(true);
-    }
-  } catch (error) {
-    console.error('自动同步失败:', error);
-    // 静默失败，不显示错误提示
-  }
+function applyMergedResult(result) {
+  notes = result.merged;
+  deletedNotes = result.deletedNotes;
+  const orderMap = new Map(result.noteOrder.map((id, index) => [String(id), index]));
+  notes.sort((a, b) => (orderMap.get(String(a.id)) ?? Infinity) - (orderMap.get(String(b.id)) ?? Infinity));
 }
 
-// 智能合并笔记（按ID和更新时间）
-function mergeNotes(localNotes, cloudNotes) {
-  const mergedMap = new Map();
-  const conflicts = [];
-  
-  // 先添加所有本地笔记
-  localNotes.forEach(note => {
-    mergedMap.set(note.id, { ...note, source: 'local' });
-  });
-  
-  // 合并云端笔记
-  cloudNotes.forEach(cloudNote => {
-    const localNote = mergedMap.get(cloudNote.id);
-    
-    if (localNote) {
-      // 相同ID的笔记，比较更新时间
-      if (cloudNote.updatedAt > localNote.updatedAt) {
-        // 云端更新，替换
-        mergedMap.set(cloudNote.id, { ...cloudNote, source: 'cloud' });
-      } else if (cloudNote.updatedAt < localNote.updatedAt) {
-        // 本地更新，保留本地
-        // 但标记为有冲突（时间不同）
-        conflicts.push({
-          id: cloudNote.id,
-          local: localNote,
-          cloud: cloudNote
-        });
-      }
-      // 如果时间相同，保留本地
-    } else {
-      // 云端有本地没有，添加
-      mergedMap.set(cloudNote.id, { ...cloudNote, source: 'cloud' });
-    }
-  });
-  
-  // 转换为数组
-  const merged = Array.from(mergedMap.values());
-  
-  // 按更新时间倒序排列（最新的在前）
-  merged.sort((a, b) => b.updatedAt - a.updatedAt);
-  
-  return { merged, conflicts };
-}
-
-// 从云端同步（手动点击同步按钮）- 智能合并
-async function syncFromCloud() {
+async function performSync({ interactive = false } = {}) {
   if (!isAuthenticated) {
-    showToast('请先登录');
+    if (interactive) showToast('请先登录一次 Google，之后会自动同步');
     return;
   }
-  
-  // 检查网络连接
-  const isOnline = await checkNetwork();
-  if (!isOnline) {
-    showToast('同步失败，因为网络连接不上，请稍后重试');
-    return;
-  }
-  
+  if (syncInProgress) return;
+  syncInProgress = true;
   try {
+    await flushPendingEdit();
+    if (!(await checkNetwork())) throw new Error('网络连接失败，请稍后重试');
+    if (interactive) updateSyncStatus('正在读取两端数据...', 'syncing');
     const token = await getAuthToken(false);
-    
-    // 搜索云端文件
-    const searchResponse = await fetch(
-      'https://www.googleapis.com/drive/v3/files?q=name=%27memo_backup.json%27+and+%27appDataFolder%27+in+parents&spaces=appDataFolder',
-      { headers: { 'Authorization': `Bearer ${token}` } }
+    const cloudState = await fetchCloudState(token);
+    const cloudData = cloudState?.data || {};
+    const result = MemoSync.mergeNoteSets(
+      notes,
+      cloudData.notes || [],
+      syncBaseNotes,
+      deletedNotes,
+      cloudData.deletedNotes,
+      notes.map(note => note.id),
+      cloudData.noteOrder
     );
-    const searchResult = await searchResponse.json();
-    
-    if (searchResult.files && searchResult.files.length > 0) {
-      // 下载文件
-      const fileResponse = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${searchResult.files[0].id}?alt=media`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      
-      if (fileResponse.ok) {
-        const data = await fileResponse.json();
-        
-        if (data.notes && Array.isArray(data.notes)) {
-          // 智能合并
-          const { merged, conflicts } = mergeNotes(notes, data.notes);
-          
-          // 显示合并预览
-          const mergeChoice = await showMergeDialog(
-            notes.length, 
-            data.notes.length, 
-            merged.length,
-            conflicts.length
-          );
-          
-          if (mergeChoice === 'merge') {
-            // 使用智能合并结果
-            notes = merged.map(({ source, ...note }) => note); // 移除 source 标记
-            
-            await saveNotes();
-            saveNoteOrder();
-            renderNoteList();
-            
-            // 默认选中第一个
-            if (notes.length > 0) {
-              selectNote(notes[0].id);
-            }
-            
-            showToast(`已合并完成，共 ${merged.length} 条笔记`);
-          } else if (mergeChoice === 'cloud') {
-            // 用云端数据完全覆盖本地
-            notes = data.notes;
-            
-            // 恢复顺序
-            if (data.noteOrder && Array.isArray(data.noteOrder)) {
-              const orderMap = new Map(data.noteOrder.map((id, index) => [id, index]));
-              notes.sort((a, b) => {
-                const orderA = orderMap.get(a.id) ?? Infinity;
-                const orderB = orderMap.get(b.id) ?? Infinity;
-                return orderA - orderB;
-              });
-            }
-            
-            await saveNotes();
-            saveNoteOrder();
-            renderNoteList();
-            
-            if (notes.length > 0) {
-              selectNote(notes[0].id);
-            }
-            
-            showToast('已用云端数据覆盖本地');
-          } else if (mergeChoice === 'local') {
-            // 用户选择保留本地，不上传
-            showToast('已保留本地数据');
-          }
-        }
-      } else {
-        throw new Error('下载失败');
-      }
-    } else {
-      showToast('云端暂无数据');
+
+    if (interactive) {
+      const choice = await showMergeDialog(result);
+      if (choice !== 'merge') return;
     }
+
+    applyMergedResult(result);
+    await saveNotes({ markModified: false });
+    await saveNoteOrder();
+    const envelope = MemoSync.createEnvelope(notes, result.noteOrder, deletedNotes);
+    await uploadCloudState(token, envelope, cloudState?.fileId || null);
+    syncBaseNotes = MemoSync.normalizeNotes(notes);
+    await chrome.storage.local.set({
+      syncBaseNotes,
+      lastSync: Date.now(),
+      noteOrder: result.noteOrder,
+      deletedNotes
+    });
+    pendingSyncToCloud = false;
+    renderNoteList();
+    if (notes.length > 0 && !notes.some(note => note.id === currentNoteId)) selectNote(notes[0].id);
+    updateSyncStatus(`已合并同步 · ${notes.length} 条笔记`);
+    if (interactive) showToast(`已合并同步，共 ${notes.length} 条笔记`);
   } catch (error) {
     console.error('同步失败:', error);
-    showToast('同步失败，因为网络连接不上，请稍后重试');
+    pendingSyncToCloud = true;
+    updateSyncStatus('同步失败，稍后自动重试', 'error');
+    if (interactive) showToast('同步失败：' + error.message);
+  } finally {
+    syncInProgress = false;
   }
 }
 
-// 显示同步选择对话框
-function showSyncDialog(cloudCount, localCount) {
-  return new Promise((resolve) => {
-    syncDialogResolve = resolve;
-    elements.syncDialogText.textContent = `云端有 ${cloudCount} 条笔记，本地有 ${localCount} 条笔记。`;
-    elements.syncDialog.classList.remove('hidden');
-  });
+// 两个同步按钮都走同一条合并流程。
+async function syncToCloud() {
+  await performSync({ interactive: true });
 }
 
-// 关闭同步对话框
-function closeSyncDialog(result) {
-  elements.syncDialog.classList.add('hidden');
-  if (syncDialogResolve) {
-    syncDialogResolve(result);
-    syncDialogResolve = null;
-  }
+async function syncFromCloud() {
+  await performSync({ interactive: true });
+}
+
+async function autoSyncFromCloud() {
+  await performSync({ interactive: false });
 }
 
 // 显示合并预览对话框
 let mergeDialogResolve = null;
-function showMergeDialog(localCount, cloudCount, mergedCount, conflictCount) {
+function showMergeDialog(result) {
   return new Promise((resolve) => {
     mergeDialogResolve = resolve;
-    elements.localCountSpan.textContent = localCount;
-    elements.cloudCountSpan.textContent = cloudCount;
-    elements.mergedCountSpan.textContent = mergedCount;
+    elements.localCountSpan.textContent = result.localCount;
+    elements.cloudCountSpan.textContent = result.cloudCount;
+    elements.mergedCountSpan.textContent = result.mergedCount;
     
-    if (conflictCount > 0) {
-      elements.conflictInfo.textContent = `发现 ${conflictCount} 条笔记在两端都有更新，将保留最新版本`;
+    if (result.conflictCount > 0) {
+      elements.conflictInfo.textContent = `发现 ${result.conflictCount} 处同时修改：不同内容会合并，同一段落按最新修改时间处理`;
     } else {
-      elements.conflictInfo.textContent = '没有发现冲突';
+      elements.conflictInfo.textContent = '没有发现冲突，点击后会把两端内容合并并写回云端';
     }
     
     elements.mergeDialog.classList.remove('hidden');
@@ -886,12 +813,7 @@ function setupEventListeners() {
   elements.loginBtn.addEventListener('click', login);
   elements.logoutBtn.addEventListener('click', logout);
   
-  // 同步对话框按钮
-  elements.syncToLocalBtn.addEventListener('click', () => closeSyncDialog('local'));
-  elements.syncToCloudDialogBtn.addEventListener('click', () => closeSyncDialog('cloud'));
-  elements.syncCancelBtn.addEventListener('click', () => closeSyncDialog('cancel'));
-  
-  // 同步到云端按钮
+  // 两个按钮都执行合并，不再提供覆盖云端或覆盖本地的操作。
   elements.syncToCloudBtn.addEventListener('click', () => {
     if (!isAuthenticated) {
       showToast('请先登录');
@@ -911,9 +833,20 @@ function setupEventListeners() {
   
   // 合并对话框按钮
   elements.mergeBtn.addEventListener('click', () => closeMergeDialog('merge'));
-  elements.useCloudBtn.addEventListener('click', () => closeMergeDialog('cloud'));
-  elements.useLocalBtn.addEventListener('click', () => closeMergeDialog('local'));
   elements.mergeCancelBtn.addEventListener('click', () => closeMergeDialog('cancel'));
+
+  // 编辑器内支持 Ctrl/Cmd + Z 和 Ctrl/Cmd + Y。
+  document.addEventListener('keydown', (event) => {
+    const editing = event.target === elements.noteTitle || event.target === elements.noteContent;
+    if (!editing || !(event.ctrlKey || event.metaKey)) return;
+    if (event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      undoEdit();
+    } else if (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey)) {
+      event.preventDefault();
+      redoEdit();
+    }
+  });
 }
 
 // 显示提示
